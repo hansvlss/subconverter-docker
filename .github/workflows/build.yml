@@ -87,8 +87,8 @@ jobs:
                 mv "${SC_HOME}/subconverter/"* "${SC_HOME}/" && rmdir "${SC_HOME}/subconverter"; \
               fi; \
               [ -x "${SC_HOME}/subconverter" ] || (echo "binary not found"; ls -al "${SC_HOME}"; exit 4); \
-chmod +x "${SC_HOME}/subconverter"; \
-chown -R app:app "${SC_HOME}"
+              chmod +x "${SC_HOME}/subconverter"; \
+              chown -R app:app "${SC_HOME}"
           COPY entrypoint.sh /entrypoint.sh
           COPY rootfs/ /
           EXPOSE 25500
