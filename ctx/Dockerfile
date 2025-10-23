@@ -8,14 +8,13 @@ WORKDIR ${SC_HOME}
 # 安装依赖
 RUN apk add --no-cache bash curl tar unzip ca-certificates && update-ca-certificates
 
-# 下载 subconverter 二进制
+# 使用 buildx 的 TARGETARCH 环境变量来自动识别架构
 RUN set -eux; \
-    ARCH="$(uname -m)"; \
-    case "$ARCH" in \
-        x86_64|amd64) ARCH=linux64 ;; \
-        aarch64|arm64) ARCH=linuxarm64 ;; \
-        armv7l|armhf) ARCH=linuxarmv7 ;; \
-        *) echo "❌ Unsupported architecture: $ARCH" && exit 1 ;; \
+    case "${TARGETARCH}" in \
+        amd64|x86_64) ARCH=linux64 ;; \
+        arm64|aarch64) ARCH=linuxarm64 ;; \
+        armv7|armhf) ARCH=linuxarmv7 ;; \
+        *) echo "❌ Unsupported TARGETARCH: ${TARGETARCH}" && exit 1 ;; \
     esac; \
     echo ">>> Downloading subconverter for $ARCH ..."; \
     curl -L -o subconverter.tar.gz "https://github.com/tindy2013/subconverter/releases/latest/download/subconverter_${ARCH}.tar.gz"; \
@@ -30,7 +29,7 @@ RUN chmod +x /entrypoint.sh
 EXPOSE 25500
 ENV SC_PORT=25500 SC_ADDR=0.0.0.0
 
-# 明确指定 root 用户
+# 以 root 运行，防止权限问题
 USER root
 
 # 启动命令
