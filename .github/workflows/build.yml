@@ -30,6 +30,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # === Step 1: 构建上下文 ===
       - name: Prepare build context
         shell: bash
         run: |
@@ -68,7 +69,7 @@ jobs:
                 *) echo "Unsupported TARGETARCH: ${TARGETARCH}"; exit 1 ;; \
               esac; \
               PKG=$(find /tmp/vendor -type f -name "subconverter_${ARCH}*" | head -n 1 || true); \
-              [ -n "$PKG" ] || (echo "no vendor package found"; ls -al /tmp/vendor; exit 2); \
+              [ -n "$PKG" ] || (echo "❌ no vendor package found"; ls -al /tmp/vendor; exit 2); \
               echo ">>> installing from: $PKG"; \
               case "$PKG" in \
                 *.zip) unzip -q "$PKG" -d "${SC_HOME}" ;; \
@@ -88,12 +89,13 @@ jobs:
           ENTRYPOINT ["/entrypoint.sh"]
           DOCKER
 
+      # === Step 2: 下载 subconverter 官方 release 资产 ===
       - name: Fetch release assets dynamically
         id: assets
         shell: bash
         run: |
           set -euxo pipefail
-          mkdir -p ctx/vendor
+          mkdir -p vendor
           VER="${{ inputs.sc_ver || 'v0.9.0' }}"
           TAG="v${VER#v}"
           echo ">>> fetching GitHub release asset list for ${TAG}"
@@ -101,7 +103,7 @@ jobs:
           curl -sSf "https://api.github.com/repos/tindy2013/subconverter/releases/tags/${TAG}" \
             -H "Accept: application/vnd.github+json" > release.json
 
-          echo ">>> assets found:"
+          echo ">>> available assets:"
           jq -r '.assets[].name' release.json || true
 
           for ARCH in linux64 linuxarm64; do
@@ -113,14 +115,29 @@ jobs:
             URL=$(jq -r --arg f "$FILE" '.assets[] | select(.name==$f) | .browser_download_url' release.json)
             EXT="${FILE##*.}"
             [ "$EXT" = "$FILE" ] && EXT=""
-            OUT="ctx/vendor/subconverter_${ARCH}.${EXT}"
+            OUT="vendor/subconverter_${ARCH}.${EXT}"
             echo ">>> downloading $URL → $OUT"
             curl -fL --retry 5 -o "$OUT" "$URL"
           done
 
-          echo ">>> Final vendor directory content:"
-          ls -lh ctx/vendor
+          echo ">>> vendor directory after download:"
+          ls -lh vendor
 
+      # === Step 3: 上传 vendor artifact（供后续构建使用） ===
+      - name: Upload vendor artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: subconverter_vendor
+          path: vendor
+
+      # === Step 4: 下载 vendor 到 ctx/ 目录 ===
+      - name: Download vendor artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: subconverter_vendor
+          path: ctx/vendor
+
+      # === Step 5: 构建镜像 ===
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -151,14 +168,3 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: ctx
-          file: ctx/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-
-      - name: Upload debug artifacts (on failure)
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-artifacts
-          path: ctx/**
