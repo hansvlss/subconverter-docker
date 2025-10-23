@@ -4,9 +4,9 @@ FROM alpine:latest
 ENV SC_HOME=/opt/subconverter
 WORKDIR ${SC_HOME}
 
-RUN apk add --no-cache bash curl unzip ca-certificates && update-ca-certificates
+RUN apk add --no-cache bash curl tar ca-certificates && update-ca-certificates
 
-# 自动检测架构并下载 subconverter（新版 zip 格式）
+# 自动检测架构并下载 subconverter（新版 release 兼容）
 RUN set -eux; \
     ARCH="${TARGETARCH:-$(uname -m)}"; \
     case "$ARCH" in \
@@ -16,10 +16,10 @@ RUN set -eux; \
         *) echo "⚠️ Unknown architecture: $ARCH, fallback to linux64"; ARCH=linux64 ;; \
     esac; \
     echo ">>> Detected ARCH=$ARCH"; \
-    URL="https://github.com/tindy2013/subconverter/releases/latest/download/subconverter_${ARCH}.zip"; \
+    URL="https://github.com/tindy2013/subconverter/releases/latest/download/subconverter_${ARCH}.tar.gz"; \
     echo ">>> Downloading $URL ..."; \
-    curl -fL -o subconverter.zip "$URL" || (echo "❌ Download failed. Check URL: $URL" && exit 1); \
-    unzip -q subconverter.zip -d ${SC_HOME}; \
+    curl -fL -o subconverter.tar.gz "$URL" || (echo "❌ Download failed. Check URL: $URL" && exit 1); \
+    tar -xzf subconverter.tar.gz -C ${SC_HOME}; \
     chmod -R 755 ${SC_HOME}
 
 COPY entrypoint.sh /entrypoint.sh
