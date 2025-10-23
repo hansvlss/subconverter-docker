@@ -1,177 +1,36 @@
-name: build
+name: Build subconverter (Claw Cloud)
 
 on:
-  workflow_dispatch:
-    inputs:
-      sc_ver:
-        description: "subconverter release tag (e.g. v0.9.0)"
-        required: false
-        default: "v0.9.0"
-      push_latest:
-        description: "Also push :latest tag?"
-        type: boolean
-        required: false
-        default: true
   push:
-    branches: [ main, master ]
-
-permissions:
-  contents: read
-  packages: write
-
-env:
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/subconverter
+    branches:
+      - main
+  workflow_dispatch:
 
 jobs:
   docker:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      # === Step 1: 构建上下文 ===
-      - name: Prepare build context
-        shell: bash
-        run: |
-          set -euxo pipefail
-          mkdir -p ctx/vendor ctx/rootfs/etc/subconverter
-
-          cat > ctx/entrypoint.sh <<'SH'
-          #!/usr/bin/env sh
-          set -eu
-          : "${SC_PORT:=25500}"
-          : "${SC_ADDR:=0.0.0.0}"
-          : "${SC_ARGS:=}"
-          exec /opt/subconverter/subconverter -localaddr "${SC_ADDR}:${SC_PORT}" ${SC_ARGS}
-          SH
-          chmod +x ctx/entrypoint.sh
-
-          cat > ctx/rootfs/etc/subconverter/pref.ini <<'INI'
-          [common]
-          api_access = true
-          port = 25500
-          INI
-
-          cat > ctx/Dockerfile <<'DOCKER'
-          FROM alpine:3.20
-          ARG TARGETARCH
-          ARG SC_HOME=/opt/subconverter
-          RUN set -eux; \
-              apk add --no-cache ca-certificates tzdata bash unzip curl libstdc++; \
-              adduser -D -h /home/app app; \
-              mkdir -p ${SC_HOME}
-          COPY vendor/ /tmp/vendor/
-          RUN set -eux; \
-              case "${TARGETARCH}" in \
-                amd64)  ARCH=linux64 ;; \
-                arm64)  ARCH=linuxarm64 ;; \
-                *) echo "Unsupported TARGETARCH: ${TARGETARCH}"; exit 1 ;; \
-              esac; \
-              PKG=$(find /tmp/vendor -type f -name "subconverter_${ARCH}*" | head -n 1 || true); \
-              [ -n "$PKG" ] || (echo "❌ no vendor package found"; ls -al /tmp/vendor; exit 2); \
-              echo ">>> installing from: $PKG"; \
-              case "$PKG" in \
-                *.zip) unzip -q "$PKG" -d "${SC_HOME}" ;; \
-                *.tar.gz) tar -xzf "$PKG" -C "${SC_HOME}" ;; \
-                *) mv "$PKG" "${SC_HOME}/subconverter"; chmod +x "${SC_HOME}/subconverter" ;; \
-              esac; \
-              if [ -d "${SC_HOME}/subconverter" ]; then \
-                mv "${SC_HOME}/subconverter/"* "${SC_HOME}/" && rmdir "${SC_HOME}/subconverter"; \
-              fi; \
-              chmod +x "${SC_HOME}/subconverter" || true; \
-              # chown -R app:app "${SC_HOME}"
-          COPY entrypoint.sh /entrypoint.sh
-          # COPY ./rootfs/ /
-          EXPOSE 25500
-          # 移除 USER app，确保以 root 身份运行
-          ENV SC_PORT=25500 SC_ADDR=0.0.0.0
-          # RUN chmod +x /entrypoint.sh || true
-          ENTRYPOINT ["/entrypoint.sh"]
-          DOCKER
-
-      # === Step 2: 下载 subconverter 官方 release 资产 ===
-      - name: Fetch release assets dynamically
-        id: assets
-        shell: bash
-        run: |
-          set -euxo pipefail
-          mkdir -p vendor
-          VER="${{ inputs.sc_ver || 'v0.9.0' }}"
-          TAG="v${VER#v}"
-          echo ">>> fetching GitHub release asset list for ${TAG}"
-
-          curl -sSf "https://api.github.com/repos/tindy2013/subconverter/releases/tags/${TAG}" \
-            -H "Accept: application/vnd.github+json" > release.json
-
-          echo ">>> available assets:"
-          jq -r '.assets[].name' release.json || true
-
-          for ARCH in linux64 linuxarm64; do
-            FILE=$(jq -r --arg a "$ARCH" '.assets[].name | select(test($a))' release.json | head -n1 || true)
-            if [ -z "$FILE" ]; then
-              echo "❌ No asset found for $ARCH"
-              continue
-            fi
-            URL=$(jq -r --arg f "$FILE" '.assets[] | select(.name==$f) | .browser_download_url' release.json)
-            EXT="${FILE##*.}"
-            [ "$EXT" = "$FILE" ] && EXT=""
-            OUT="vendor/subconverter_${ARCH}.${EXT}"
-            echo ">>> downloading $URL → $OUT"
-            curl -fL --retry 5 -o "$OUT" "$URL"
-          done
-
-          echo ">>> vendor directory after download:"
-          ls -lh vendor
-
-      # === Step 3: 上传 vendor artifact（供后续构建使用） ===
-      - name: Upload vendor artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: subconverter_vendor
-          path: vendor
-
-      # === Step 4: 下载 vendor 到 ctx/ 目录 ===
-      - name: Download vendor artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: subconverter_vendor
-          path: ctx/vendor
-
-      # === Step 5: 构建镜像 ===
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login GHCR
+      - name: Login to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute tags
-        id: meta
-        shell: bash
-        run: |
-          set -euo pipefail
-          IN_VER="${{ inputs.sc_ver || 'v0.9.0' }}"
-          VER="${IN_VER#v}"
-          TAGS="${{ env.IMAGE_NAME }}:${VER}"
-          if [ "${{ inputs.push_latest || true }}" = "true" ]; then
-            TAGS="${TAGS},${{ env.IMAGE_NAME }}:latest"
-          fi
-          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
-
-      # === Claw Cloud 镜像专用版本 ===
-      - name: Build & Push (Claw Cloud edition)
+      - name: Build & Push Docker Image
         uses: docker/build-push-action@v6
         with:
-          context: ctx
-          file: ctx/Dockerfile
+          context: .                      # ✅ 构建上下文为仓库根目录
+          file: ctx/Dockerfile             # ✅ 指向 Dockerfile 实际路径
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/subconverter:claw
+          tags: ghcr.io/${{ github.repository_owner }}/subconverter:claw
