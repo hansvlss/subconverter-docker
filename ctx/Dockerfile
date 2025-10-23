@@ -8,17 +8,16 @@ WORKDIR ${SC_HOME}
 # 安装依赖
 RUN apk add --no-cache bash curl tar unzip ca-certificates && update-ca-certificates
 
-# 自动检测架构（支持 buildx 和传统 docker）
+# 自动检测架构并下载 subconverter
 RUN set -eux; \
     ARCH="${TARGETARCH:-$(uname -m)}"; \
     case "$ARCH" in \
-        amd64|x86_64) ARCH=linux64 ;; \
+        amd64|x86_64|x86_64v2|x86_64v3|x64) ARCH=linux64 ;; \
         arm64|aarch64) ARCH=linuxarm64 ;; \
         armv7|armhf) ARCH=linuxarmv7 ;; \
-        *) echo "❌ Unsupported architecture: $ARCH" && exit 1 ;; \
+        *) echo "⚠️ Unknown architecture: $ARCH, fallback to linux64"; ARCH=linux64 ;; \
     esac; \
     echo ">>> Detected ARCH=$ARCH"; \
-    echo ">>> Downloading subconverter binary..."; \
     curl -L -o subconverter.tar.gz "https://github.com/tindy2013/subconverter/releases/latest/download/subconverter_${ARCH}.tar.gz"; \
     tar -xzf subconverter.tar.gz -C ${SC_HOME}; \
     chmod -R 755 ${SC_HOME}
@@ -31,7 +30,7 @@ RUN chmod +x /entrypoint.sh
 EXPOSE 25500
 ENV SC_PORT=25500 SC_ADDR=0.0.0.0
 
-# 以 root 运行，避免权限问题
+# 以 root 运行防止权限问题
 USER root
 
 # 启动命令
