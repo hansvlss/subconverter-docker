@@ -84,8 +84,9 @@ jobs:
           COPY entrypoint.sh /entrypoint.sh
           COPY rootfs/ /
           EXPOSE 25500
-          USER app
+          # 移除 USER app，确保以 root 身份运行
           ENV SC_PORT=25500 SC_ADDR=0.0.0.0
+          RUN chmod +x /entrypoint.sh || true
           ENTRYPOINT ["/entrypoint.sh"]
           DOCKER
 
