@@ -1,18 +1,29 @@
-# syntax=docker/dockerfile:1
-FROM alpine:latest
+FROM debian:bullseye-slim
 
-ENV SC_HOME=/opt/subconverter
-WORKDIR ${SC_HOME}
+WORKDIR /opt/subconverter
 
-RUN apk add --no-cache bash ca-certificates && update-ca-certificates
+# 安装基础依赖
+RUN apt-get update && apt-get install -y curl tar && \
+    rm -rf /var/lib/apt/lists/*
 
-# 将 GitHub Actions 预下载的 subconverter 拷贝进来
-COPY tmp/subconverter ${SC_HOME}/subconverter
+# 自动检测架构并下载 subconverter 二进制
+RUN ARCH=$(uname -m) && \
+    case "$ARCH" in \
+        x86_64) ARCH=linux64 ;; \
+        aarch64) ARCH=linux-arm64 ;; \
+        armv7l) ARCH=linux-armv7 ;; \
+        *) ARCH=linux64 ;; \
+    esac && \
+    echo ">>> Detected ARCH=$ARCH" && \
+    curl -L -o subconverter.tar.gz https://github.com/tindy2013/subconverter/releases/latest/download/subconverter_${ARCH}.tar.gz && \
+    tar -xzf subconverter.tar.gz --strip-components=1 && \
+    chmod +x subconverter && \
+    rm subconverter.tar.gz
 
+# 拷贝启动脚本
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh ${SC_HOME}/subconverter
+RUN chmod +x /entrypoint.sh
 
 EXPOSE 25500
-ENV SC_PORT=25500 SC_ADDR=0.0.0.0
 
 ENTRYPOINT ["/entrypoint.sh"]
