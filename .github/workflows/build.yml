@@ -98,7 +98,7 @@ jobs:
           TAG="v${VER#v}"
           echo ">>> fetching GitHub release asset list for ${TAG}"
 
-          # 调用 GitHub API 获取 release 信息
+          # 获取 Release 信息
           curl -sSf "https://api.github.com/repos/tindy2013/subconverter/releases/tags/${TAG}" \
             -H "Accept: application/vnd.github+json" > release.json
 
@@ -112,11 +112,15 @@ jobs:
               continue
             fi
             URL=$(jq -r --arg f "$FILE" '.assets[] | select(.name==$f) | .browser_download_url' release.json)
-            echo ">>> downloading $URL → subconverter_${ARCH}"
-            curl -fL --retry 5 -o "subconverter_${ARCH}${FILE##*.zip}" "$URL" || true
+            EXT="${FILE##*.}"
+            [ "$EXT" = "$FILE" ] && EXT=""
+            OUT="subconverter_${ARCH}.${EXT}"
+            echo ">>> downloading $URL → $OUT"
+            curl -fL --retry 5 -o "$OUT" "$URL"
           done
 
-          ls -lh
+          echo ">>> vendor directory after download:"
+          ls -lh .
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -158,4 +162,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: debug-artifacts
-          path: ctx/vendor/**
+          path: ctx/**
