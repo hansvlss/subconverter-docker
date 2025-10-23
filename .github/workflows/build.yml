@@ -8,6 +8,7 @@ on:
 jobs:
   docker:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -45,6 +46,7 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
+          # 🔥 核心点：构建上下文设为 ctx
           context: ./ctx
           platforms: linux/amd64,linux/arm64,linux/arm/v7
           push: true
