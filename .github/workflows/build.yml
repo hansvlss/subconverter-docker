@@ -80,7 +80,7 @@ jobs:
                 mv "${SC_HOME}/subconverter/"* "${SC_HOME}/" && rmdir "${SC_HOME}/subconverter"; \
               fi; \
               chmod +x "${SC_HOME}/subconverter" || true; \
-              chown -R app:app "${SC_HOME}"
+              # chown -R app:app "${SC_HOME}"
           COPY entrypoint.sh /entrypoint.sh
           COPY rootfs/ /
           EXPOSE 25500
