@@ -81,8 +81,8 @@ jobs:
               fi; \
               chmod +x "${SC_HOME}/subconverter" || true; \
               # chown -R app:app "${SC_HOME}"
-          COPY ./entrypoint.sh /entrypoint.sh
-          COPY ./rootfs/ /
+          COPY entrypoint.sh /entrypoint.sh
+          # COPY ./rootfs/ /
           EXPOSE 25500
           # 移除 USER app，确保以 root 身份运行
           ENV SC_PORT=25500 SC_ADDR=0.0.0.0
