@@ -76,14 +76,10 @@ jobs:
                 arm64)  ARCH=linuxarm64 ;; \
                 *) echo "Unsupported TARGETARCH: ${TARGETARCH}"; exit 1 ;; \
               esac; \
-              PKG="/tmp/vendor/subconverter_${ARCH}.tar.gz"; \
-              [ -f "$PKG" ] || PKG="/tmp/vendor/subconverter_${ARCH}.zip"; \
+              PKG="/tmp/vendor/subconverter_${ARCH}.zip"; \
               [ -f "$PKG" ] || (echo "vendor package missing"; ls -al /tmp/vendor; exit 2); \
               echo ">>> using package: $PKG"; \
-              case "$PKG" in \
-                *.zip) unzip -q "$PKG" -d "${SC_HOME}" ;; \
-                *.tar.gz) tar -xzf "$PKG" -C "${SC_HOME}" ;; \
-              esac; \
+              unzip -q "$PKG" -d "${SC_HOME}"; \
               if [ -d "${SC_HOME}/subconverter" ]; then \
                 mv "${SC_HOME}/subconverter/"* "${SC_HOME}/" && rmdir "${SC_HOME}/subconverter"; \
               fi; \
@@ -97,7 +93,7 @@ jobs:
           ENTRYPOINT ["/entrypoint.sh"]
           DOCKER
 
-      - name: Prepare vendor (with fallback mirrors)
+      - name: Prepare vendor (download .zip release)
         shell: bash
         run: |
           set -eux
@@ -107,28 +103,13 @@ jobs:
           VER="${SC_VER:-v0.9.0}"
           N="${VER#v}"; VER="v${N}"
 
-          download() {
-            local ARCH="$1"
-            local FILE="vendor/subconverter_${ARCH}.tar.gz"
-            for BASE in \
-              "https://github.com/tindy2013/subconverter/releases/download/${VER}" \
-              "https://download.fastgit.org/tindy2013/subconverter/releases/download/${VER}" \
-              "https://cdn.jsdelivr.net/gh/tindy2013/subconverter@${VER}" \
-              "https://ghproxy.net/https://github.com/tindy2013/subconverter/releases/download/${VER}" \
-            ; do
-              URL="${BASE}/subconverter_${ARCH}.tar.gz"
-              echo ">>> trying ${URL}"
-              if curl -fL --retry 5 -o "$FILE" "$URL"; then
-                echo "✅ downloaded $FILE"
-                return 0
-              fi
-            done
-            echo "❌ failed to download subconverter_${ARCH}" >&2
-            return 22
-          }
-
-          download linux64
-          download linuxarm64
+          for ARCH in linux64 linuxarm64; do
+            FILE="vendor/subconverter_${ARCH}.zip"
+            URL="https://github.com/tindy2013/subconverter/releases/download/${VER}/subconverter_${ARCH}.zip"
+            echo ">>> downloading $URL"
+            curl -fL --retry 5 -o "$FILE" "$URL"
+            file "$FILE" || true
+          done
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -150,7 +131,7 @@ jobs:
           set -euo pipefail
           VER="${SC_VER#v}"
           echo "ver=${VER}" >> "$GITHUB_OUTPUT"
-          TAGS="${IMAGE_NAME}:${VER}-fix"
+          TAGS="${IMAGE_NAME}:${VER}-zip"
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
 
       - name: Build & Push
