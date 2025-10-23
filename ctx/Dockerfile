@@ -10,11 +10,12 @@ RUN apk add --no-cache bash curl tar unzip ca-certificates && update-ca-certific
 
 # 下载 subconverter 二进制
 RUN set -eux; \
-    case "$(uname -m)" in \
-        x86_64) ARCH=linux64 ;; \
-        aarch64) ARCH=linuxarm64 ;; \
-        armv7l) ARCH=linuxarmv7 ;; \
-        *) echo "❌ Unsupported architecture: $(uname -m)" && exit 1 ;; \
+    ARCH="$(uname -m)"; \
+    case "$ARCH" in \
+        x86_64|amd64) ARCH=linux64 ;; \
+        aarch64|arm64) ARCH=linuxarm64 ;; \
+        armv7l|armhf) ARCH=linuxarmv7 ;; \
+        *) echo "❌ Unsupported architecture: $ARCH" && exit 1 ;; \
     esac; \
     echo ">>> Downloading subconverter for $ARCH ..."; \
     curl -L -o subconverter.tar.gz "https://github.com/tindy2013/subconverter/releases/latest/download/subconverter_${ARCH}.tar.gz"; \
