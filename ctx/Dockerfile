@@ -4,9 +4,10 @@ FROM alpine:latest
 ENV SC_HOME=/opt/subconverter
 WORKDIR ${SC_HOME}
 
-RUN apk add --no-cache bash curl tar ca-certificates jq && update-ca-certificates
+# 安装基础工具 + 证书 + curl 重定向兼容
+RUN apk add --no-cache bash curl tar ca-certificates openssl && update-ca-certificates
 
-# 自动检测架构 + 获取最新版本 tag + 下载 subconverter
+# 下载 subconverter 可执行文件（兼容 GitHub Actions / QEMU）
 RUN set -eux; \
     ARCH="${TARGETARCH:-$(uname -m)}"; \
     case "$ARCH" in \
@@ -15,13 +16,13 @@ RUN set -eux; \
         armv7|armhf) ARCH=linux-armv7 ;; \
         *) echo "⚠️ Unknown architecture: $ARCH, fallback to linux64"; ARCH=linux64 ;; \
     esac; \
-    TAG=$(curl -s https://api.github.com/repos/tindy2013/subconverter/releases/latest | jq -r .tag_name); \
-    if [ "$TAG" = "null" ] || [ -z "$TAG" ]; then TAG="v0.9.0"; fi; \
-    echo ">>> Latest version: $TAG"; \
-    URL="https://github.com/tindy2013/subconverter/releases/download/${TAG}/subconverter_${ARCH}.tar.gz"; \
+    echo ">>> Detected ARCH=$ARCH"; \
+    URL="https://github.com/tindy2013/subconverter/releases/latest/download/subconverter_${ARCH}.tar.gz"; \
     echo ">>> Downloading $URL ..."; \
-    curl -fL -o subconverter.tar.gz "$URL" || (echo "❌ Download failed. Check URL: $URL" && exit 1); \
-    tar -xzf subconverter.tar.gz -C ${SC_HOME}; \
+    # 关键改动：使用 --retry --connect-timeout 并忽略 SSL 重定向问题
+    curl -L --retry 5 --connect-timeout 15 --max-time 300 -o subconverter.tar.gz "$URL" || (echo "❌ Download failed: $URL" && exit 1); \
+    echo ">>> Extracting..."; \
+    tar -xzf subconverter.tar.gz -C ${SC_HOME} || (echo "❌ Extract failed!" && exit 1); \
     chmod -R 755 ${SC_HOME}
 
 COPY entrypoint.sh /entrypoint.sh
