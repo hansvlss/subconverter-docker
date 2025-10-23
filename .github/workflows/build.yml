@@ -21,8 +21,12 @@ permissions:
 
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/subconverter
-  SC_VER: ${{ inputs.sc_ver || 'v0.9.0' }}
-  PLATFORMS: linux/amd64,linux/arm64
+  # 这里只做占位，真正的版本在步骤中再次规范化
+  SC_VER: ${{ github.event.inputs.sc_ver }}
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   docker:
@@ -33,7 +37,6 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Prepare build context (Dockerfile & files)
-        shell: bash
         run: |
           set -euxo pipefail
           mkdir -p ctx/vendor ctx/rootfs/etc/subconverter
@@ -108,18 +111,19 @@ jobs:
           DOCKER
 
       - name: Prepare vendor (download release assets)
-        shell: bash
         run: |
           set -euxo pipefail
           cd ctx
           mkdir -p vendor
 
           # 版本规范化：支持 0.9.0 或 v0.9.0
-          IN_VER="${SC_VER:-v0.9.0}"
-          N="${IN_VER#v}"; SCV="v${N}"
+          IN_VER="${SC_VER:-}"
+          if [ -z "$IN_VER" ]; then IN_VER="v0.9.0"; fi
+          N="${IN_VER#v}"
+          SCV="v${N}"
           echo ">>> SC_VER input=${IN_VER}, normalized=${SCV}"
 
-          # 发布包可能是 .tar.gz 或 .zip
+          # 可能是 .tar.gz 或 .zip
           names_for_arch() {
             case "$1" in
               linux64)     echo "subconverter_linux64.tar.gz subconverter_linux64.zip" ;;
@@ -132,11 +136,11 @@ jobs:
           make_urls() {
             local ver="$1" name="$2"
             cat <<EOF
-https://github.com/tindy2013/subconverter/releases/download/${ver}/${name}
-https://download.fastgit.org/tindy2013/subconverter/releases/download/${ver}/${name}
-https://downloads.sourceforge.net/project/subconverter/${ver}/${name}
-https://cdn.jsdelivr.net/gh/tindy2013/subconverter@${ver}/${name}
-EOF
+          https://github.com/tindy2013/subconverter/releases/download/${ver}/${name}
+          https://download.fastgit.org/tindy2013/subconverter/releases/download/${ver}/${name}
+          https://downloads.sourceforge.net/project/subconverter/${ver}/${name}
+          https://cdn.jsdelivr.net/gh/tindy2013/subconverter@${ver}/${name}
+          EOF
           }
 
           CURL_OPTS=( -fsSL --retry 5 --retry-all-errors --connect-timeout 10 --max-time 120 )
@@ -145,7 +149,7 @@ EOF
             echo "=== downloading for ARCH=${ARCH}"
             OUT_FINAL=""
             for NAME in $(names_for_arch "${ARCH}"); do
-              for URL in $(make_urls "${SCV}" "${NAME}"); do
+              while read -r URL; do
                 TMP="vendor/.part_${ARCH}"
                 echo ">>> try: ${URL}"
                 (curl -I "${URL}" || true) | sed 's/^/HEAD: /' || true
@@ -172,7 +176,7 @@ EOF
                       ;;
                   esac
                 fi
-              done
+              done < <(make_urls "${SCV}" "${NAME}")
             done
             if [ -z "${OUT_FINAL}" ]; then
               echo "!!! all download candidates failed for ${ARCH}"
@@ -195,13 +199,20 @@ EOF
 
       - name: Compute tags
         id: meta
-        shell: bash
         run: |
           set -euo pipefail
-          VER="${SC_VER#v}"
+          # 版本号（去掉 v 用于 tag）
+          RAW="${SC_VER:-}"
+          if [ -z "$RAW" ]; then RAW="v0.9.0"; fi
+          VER="${RAW#v}"
           echo "ver=${VER}" >> "$GITHUB_OUTPUT"
+
+          # 是否推 :latest（workflow_dispatch 才会有该输入；push 触发时为空，默认 true）
+          PL="${{ github.event.inputs.push_latest }}"
+          if [ -z "${PL}" ]; then PL="true"; fi
+
           TAGS="${IMAGE_NAME}:${VER}"
-          if [ "${{ inputs.push_latest || true }}" = "true" ]; then
+          if [ "${PL}" = "true" ]; then
             TAGS="${TAGS},${IMAGE_NAME}:latest"
           fi
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
@@ -212,7 +223,7 @@ EOF
         with:
           context: ctx
           file: ctx/Dockerfile
-          platforms: ${{ env.PLATFORMS }}
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
 
