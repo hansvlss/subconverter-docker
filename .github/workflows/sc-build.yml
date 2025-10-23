@@ -1,0 +1,151 @@
+name: Build & Push subconverter (one-shot)
+
+on:
+  workflow_dispatch:
+    inputs:
+      sc_ver:
+        description: "subconverter release tag (e.g. v0.9.0)"
+        required: true
+        default: v0.9.0
+      image_name:
+        description: "Image name on GHCR"
+        required: true
+        default: subconverter
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SC_VER: ${{ inputs.sc_ver }}
+      IMAGE: ghcr.io/${{ github.repository_owner }}/${{ inputs.image_name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 1) 生成 Dockerfile 和 .dockerignore（无需提交）
+      - name: Generate Dockerfile & .dockerignore
+        shell: bash
+        run: |
+          set -eux
+          cat > Dockerfile <<'EOF'
+          ARG SC_VER=v0.9.0
+          FROM alpine:3.20
+          ARG SC_VER
+          ARG TARGETARCH
+          RUN set -eux; \
+              apk add --no-cache ca-certificates tzdata libstdc++ curl bash tar unzip; \
+              adduser -D -h /home/app app; \
+              mkdir -p /opt/subconverter
+          WORKDIR /opt/subconverter
+          # 拷贝 vendor 目录（Actions 步骤会把发行包放进来）
+          COPY vendor/ /tmp/vendor/
+          # 选择包并解压（兼容 .zip 与 .tar.gz 两种发行格式）
+          RUN set -eux; \
+              case "${TARGETARCH}" in \
+                amd64) ARCH=linux64 ;; \
+                arm64) ARCH=linuxarm64 ;; \
+                *) echo "Unsupported TARGETARCH: ${TARGETARCH}"; exit 1 ;; \
+              esac; \
+              PKG=$(ls -1 /tmp/vendor/subconverter_${ARCH}.* | head -n1) || (echo "!!! vendor package missing"; ls -al /tmp/vendor; exit 2); \
+              echo ">>> using package: ${PKG}"; file "${PKG}" || true; \
+              case "${PKG}" in \
+                *.zip)  unzip -q "${PKG}" -d /opt/subconverter ;; \
+                *.tgz|*.tar.gz) tar -xzf "${PKG}" -C /opt/subconverter ;; \
+                *) echo "!!! unknown package type: ${PKG}"; file "${PKG}"; exit 3 ;; \
+              esac; \
+              # 某些发行包会多包一层目录，拉平
+              if [ -d /opt/subconverter/subconverter ]; then \
+                mv /opt/subconverter/subconverter/* /opt/subconverter/ && rmdir /opt/subconverter/subconverter; \
+              fi; \
+              [ -x /opt/subconverter/subconverter ] || (echo "!!! subconverter binary not found"; ls -al /opt/subconverter; exit 4); \
+              chown -R app:app /opt/subconverter
+          EXPOSE 25500
+          USER app
+          # 可按需调整默认参数（这里只开启 http:25500）
+          CMD ["/opt/subconverter/subconverter","-d","/opt/subconverter","-p","25500"]
+          EOF
+
+          cat > .dockerignore <<'EOF'
+          .git
+          .github
+          vendor/*.log
+          EOF
+
+      # 2) 下载并缓存发行包（优先 GitHub，失败再走镜像）
+      - name: Prepare vendor (download release assets)
+        shell: bash
+        run: |
+          set -eux
+          mkdir -p vendor
+          BASE1="https://github.com/tindy2013/subconverter/releases/download/${SC_VER}"
+          BASE2="https://download.fastgit.org/tindy2013/subconverter/releases/download/${SC_VER}"
+          BASE3="https://downloads.sourceforge.net/project/subconverter/${SC_VER}"
+
+          # 每个架构尝试多种文件名与镜像源（zip/tar.gz 都兼容）
+          for ARCH in linux64 linuxarm64; do
+            OUT=""
+            for NAME in "subconverter_${ARCH}.zip" "subconverter_${ARCH}.tar.gz"; do
+              for BASE in "$BASE1" "$BASE2" "$BASE3"; do
+                URL="${BASE}/${NAME}"
+                echo ">>> try: ${URL}"
+                if curl -fsSL --retry 5 -o "vendor/${NAME}" "${URL}"; then
+                  OUT="vendor/${NAME}"
+                  break 2
+                fi
+              done
+            done
+            if [ -z "$OUT" ]; then
+              echo "!!! all download candidates failed for ${ARCH}"
+              exit 10
+            fi
+            # 统一改名，方便 Dockerfile 用通配符匹配
+            mv "$OUT" "vendor/subconverter_${ARCH}${OUT##*.zip}"
+            # 记录文件类型
+            file "vendor/subconverter_${ARCH}"* || true
+          done
+
+      # 3) 安装 QEMU/Buildx（多架构构建）
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: all
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 4) 登录 GHCR（用内置 GITHUB_TOKEN 就够了）
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 5) 构建并推送（amd64+arm64）
+      - name: Build & Push (multi-arch)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          build-args: |
+            SC_VER=${{ env.SC_VER }}
+          tags: |
+            ${{ env.IMAGE }}:${{ env.SC_VER }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 6) 失败时上传 vendor 和详细日志便于排错
+      - name: Upload vendor & logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-artifacts
+          path: |
+            vendor/**
+            Dockerfile
+            .dockerignore
