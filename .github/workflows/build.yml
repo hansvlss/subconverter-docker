@@ -66,7 +66,7 @@ jobs:
           ARG TARGETARCH
           ARG SC_HOME=/opt/subconverter
           RUN set -eux; \
-              apk add --no-cache ca-certificates tzdata bash unzip curl libstdc++; \
+              apk add --no-cache ca-certificates tzdata bash unzip curl tar libstdc++; \
               adduser -D -h /home/app app; \
               mkdir -p ${SC_HOME}
           COPY vendor/ /tmp/vendor/
@@ -76,10 +76,10 @@ jobs:
                 arm64)  ARCH=linuxarm64 ;; \
                 *) echo "Unsupported TARGETARCH: ${TARGETARCH}"; exit 1 ;; \
               esac; \
-              PKG="/tmp/vendor/subconverter_${ARCH}.zip"; \
+              PKG="/tmp/vendor/subconverter_${ARCH}.tar.gz"; \
               [ -f "$PKG" ] || (echo "vendor package missing"; ls -al /tmp/vendor; exit 2); \
               echo ">>> using package: $PKG"; \
-              unzip -q "$PKG" -d "${SC_HOME}"; \
+              tar -xzf "$PKG" -C "${SC_HOME}"; \
               if [ -d "${SC_HOME}/subconverter" ]; then \
                 mv "${SC_HOME}/subconverter/"* "${SC_HOME}/" && rmdir "${SC_HOME}/subconverter"; \
               fi; \
@@ -93,7 +93,7 @@ jobs:
           ENTRYPOINT ["/entrypoint.sh"]
           DOCKER
 
-      - name: Prepare vendor (download .zip release)
+      - name: Prepare vendor (download .tar.gz)
         shell: bash
         run: |
           set -eux
@@ -104,11 +104,23 @@ jobs:
           N="${VER#v}"; VER="v${N}"
 
           for ARCH in linux64 linuxarm64; do
-            FILE="vendor/subconverter_${ARCH}.zip"
-            URL="https://github.com/tindy2013/subconverter/releases/download/${VER}/subconverter_${ARCH}.zip"
-            echo ">>> downloading $URL"
-            curl -fL --retry 5 -o "$FILE" "$URL"
-            file "$FILE" || true
+            FILE="vendor/subconverter_${ARCH}.tar.gz"
+            for BASE in \
+              "https://github.com/tindy2013/subconverter/releases/download/${VER}" \
+              "https://download.fastgit.org/tindy2013/subconverter/releases/download/${VER}" \
+              "https://ghproxy.net/https://github.com/tindy2013/subconverter/releases/download/${VER}" \
+            ; do
+              URL="${BASE}/subconverter_${ARCH}.tar.gz"
+              echo ">>> trying $URL"
+              if curl -fL --retry 5 -o "$FILE" "$URL"; then
+                echo "✅ downloaded $FILE"
+                break
+              fi
+            done
+            if [ ! -s "$FILE" ]; then
+              echo "❌ failed to download subconverter_${ARCH}.tar.gz"
+              exit 22
+            fi
           done
 
       - name: Set up QEMU
@@ -131,7 +143,7 @@ jobs:
           set -euo pipefail
           VER="${SC_VER#v}"
           echo "ver=${VER}" >> "$GITHUB_OUTPUT"
-          TAGS="${IMAGE_NAME}:${VER}-zip"
+          TAGS="${IMAGE_NAME}:${VER}-tar"
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
 
       - name: Build & Push
