@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       sc_ver:
-        description: "subconverter release tag (e.g. v0.9.0 or 0.9.0)"
+        description: "subconverter release tag (e.g. v0.9.0)"
         required: false
         default: "v0.9.0"
       push_latest:
@@ -21,6 +21,8 @@ permissions:
 
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/subconverter
+  SC_VER: ${{ inputs.sc_ver || 'v0.9.0' }}
+  PLATFORMS: linux/amd64,linux/arm64
 
 jobs:
   docker:
@@ -30,11 +32,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 生成构建上下文（包含 Dockerfile / 入口脚本 / 默认配置）
       - name: Prepare build context
         shell: bash
         run: |
-          set -euxo pipefail
+          set -eux
           mkdir -p ctx/vendor ctx/rootfs/etc/subconverter
 
           cat > ctx/entrypoint.sh <<'SH'
@@ -43,7 +44,13 @@ jobs:
           : "${SC_PORT:=25500}"
           : "${SC_ADDR:=0.0.0.0}"
           : "${SC_ARGS:=}"
-          exec /opt/subconverter/subconverter -localaddr "${SC_ADDR}:${SC_PORT}" ${SC_ARGS}
+          BIN="/opt/subconverter/subconverter"
+          if [ ! -x "$BIN" ]; then
+            echo "subconverter binary not found or not executable" >&2
+            ls -al /opt/subconverter || true
+            chmod +x "$BIN" 2>/dev/null || true
+          fi
+          exec "$BIN" -localaddr "${SC_ADDR}:${SC_PORT}" $SC_ARGS
           SH
           chmod +x ctx/entrypoint.sh
 
@@ -76,18 +83,16 @@ jobs:
               esac; \
               PKG="/tmp/vendor/subconverter_${ARCH}.tar.gz"; \
               [ -f "$PKG" ] || PKG="/tmp/vendor/subconverter_${ARCH}.zip"; \
-              [ -f "$PKG" ] || (echo "vendor package missing for ${ARCH}"; ls -al /tmp/vendor || true; exit 2); \
-              echo ">>> using package: $PKG"; file "$PKG" || true; \
+              [ -f "$PKG" ] || (echo "vendor package missing"; ls -al /tmp/vendor; exit 2); \
+              echo ">>> using package: $PKG"; \
               case "$PKG" in \
-                *.zip)    unzip -q "$PKG" -d "${SC_HOME}" ;; \
-                *.tar.gz) tar -xzf "$PKG" -C  "${SC_HOME}" ;; \
-                *) echo "Unknown package type: $PKG"; exit 3 ;; \
+                *.zip) unzip -q "$PKG" -d "${SC_HOME}" ;; \
+                *.tar.gz) tar -xzf "$PKG" -C "${SC_HOME}" ;; \
               esac; \
               if [ -d "${SC_HOME}/subconverter" ]; then \
                 mv "${SC_HOME}/subconverter/"* "${SC_HOME}/" && rmdir "${SC_HOME}/subconverter"; \
               fi; \
-              [ -x "${SC_HOME}/subconverter" ] || (echo "binary not found"; ls -al "${SC_HOME}"; exit 4); \
-              chmod +x "${SC_HOME}/subconverter"; \
+              chmod +x "${SC_HOME}/subconverter" || true; \
               chown -R app:app "${SC_HOME}"
           COPY entrypoint.sh /entrypoint.sh
           COPY rootfs/ /
@@ -97,92 +102,19 @@ jobs:
           ENTRYPOINT ["/entrypoint.sh"]
           DOCKER
 
-      # 智能下载发布资产：存在就用，不存在就跳过
-      - name: Prepare vendor (download release assets)
-        id: vendor
+      - name: Prepare vendor
         shell: bash
         run: |
-          set -euxo pipefail
+          set -eux
           cd ctx
           mkdir -p vendor
-
-          IN_VER="${{ inputs.sc_ver || 'v0.9.0' }}"
-          SCV="v${IN_VER#v}"
-          echo ">>> target release = ${SCV}"
-
-          # (仓库中的历史版本命名不一致) —— 针对每个架构列出候选文件名（按优先级依次尝试）
-          candidates_names() {
-            case "$1" in
-              linux64)
-                echo "subconverter_linux64.tar.gz subconverter_linux64.zip"
-                ;;
-              linuxarm64)
-                # 历史上可能出现的各种写法
-                echo "subconverter_linuxarm64.tar.gz subconverter_linuxarm64.zip \
-                      subconverter_linux_aarch64.tar.gz subconverter_linux_aarch64.zip \
-                      subconverter_aarch64.tar.gz subconverter_aarch64.zip"
-                ;;
-              *)
-                return 1
-            esac
-          }
-
-          # 多源镜像
-          make_urls() {
-            local ver="$1" name="$2"
-            cat <<EOF
-          https://github.com/tindy2013/subconverter/releases/download/${ver}/${name}
-          https://download.fastgit.org/tindy2013/subconverter/releases/download/${ver}/${name}
-          https://downloads.sourceforge.net/project/subconverter/${ver}/${name}
-          https://cdn.jsdelivr.net/gh/tindy2013/subconverter@${ver}/${name}
-          EOF
-          }
-
-          CURL_OPTS=( -fsSL --retry 5 --retry-all-errors --connect-timeout 10 --max-time 120 )
-
-          OK_PLATFORMS=()
-
-          # 架构 => 平台 映射
-          try_arch() {
-            local ARCH="$1" PLATFORM="$2"
-            local OUT_FINAL=""
-            for NAME in $(candidates_names "${ARCH}"); do
-              for URL in $(make_urls "${SCV}" "${NAME}"); do
-                echo ">>> try: ${URL}"
-                (curl -I "${URL}" || true) | sed 's/^/HEAD: /' || true
-                if curl "${CURL_OPTS[@]}" -o "vendor/.part_${ARCH}" "${URL}"; then
-                  FT=$(file -b --mime-type "vendor/.part_${ARCH}" || true)
-                  case "${FT}" in
-                    application/gzip|application/x-gzip)  EXT=".tar.gz" ;;
-                    application/zip)                       EXT=".zip" ;;
-                    *) echo "!!! unexpected file type: ${FT}"; head -c 200 "vendor/.part_${ARCH}" || true; rm -f "vendor/.part_${ARCH}"; continue ;;
-                  esac
-                  OUT_FINAL="vendor/subconverter_${ARCH}${EXT}"
-                  mv -f "vendor/.part_${ARCH}" "${OUT_FINAL}"
-                  echo ">>> saved: ${OUT_FINAL}"
-                  file "${OUT_FINAL}" || true
-                  OK_PLATFORMS+=("${PLATFORM}")
-                  return 0
-                fi
-              done
-            done
-            echo ">>> ${ARCH} not found in ${SCV}, skip this arch."
-            return 1
-          }
-
-          # 尝试 amd64 / arm64
-          try_arch linux64   linux/amd64 || true
-          try_arch linuxarm64 linux/arm64 || true
-
-          if [ "${#OK_PLATFORMS[@]}" -eq 0 ]; then
-            echo "!!! no downloadable assets for ${SCV} (both amd64/arm64 missing)."
-            exit 10
-          fi
-
-          # 输出最终平台列表（逗号分隔，无空格）
-          PLAT=$(IFS=, ; echo "${OK_PLATFORMS[*]}")
-          echo "platforms=${PLAT}" >> "$GITHUB_OUTPUT"
-          echo ">>> will build for platforms: ${PLAT}"
+          VER="${SC_VER:-v0.9.0}"
+          N="${VER#v}"; VER="v${N}"
+          for ARCH in linux64 linuxarm64; do
+            URL="https://github.com/tindy2013/subconverter/releases/download/${VER}/subconverter_${ARCH}.tar.gz"
+            curl -fsSL --retry 5 -o vendor/subconverter_${ARCH}.tar.gz "$URL"
+            file vendor/subconverter_${ARCH}.tar.gz || true
+          done
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -202,11 +134,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          IN_VER="${{ inputs.sc_ver || 'v0.9.0' }}"
-          VER="${IN_VER#v}"
-          TAGS="${{ env.IMAGE_NAME }}:${VER}"
-          if [ "${{ inputs.push_latest || true }}" = "true" ]; then
-            TAGS="${TAGS},${{ env.IMAGE_NAME }}:latest"
+          VER="${SC_VER#v}"
+          echo "ver=${VER}" >> "$GITHUB_OUTPUT"
+          TAGS="${IMAGE_NAME}:${VER}-fix"
+          if [ "${{ inputs.push_latest || 'true' }}" = "true" ]; then
+            TAGS="${TAGS},${IMAGE_NAME}:latest"
           fi
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
 
@@ -215,14 +147,6 @@ jobs:
         with:
           context: ctx
           file: ctx/Dockerfile
-          platforms: ${{ steps.vendor.outputs.platforms }}
+          platforms: ${{ env.PLATFORMS }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
-
-      - name: Upload debug artifacts on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-artifacts
-          path: |
-            ctx/**
