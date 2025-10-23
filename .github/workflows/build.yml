@@ -30,7 +30,8 @@ jobs:
       - name: Build and Push subconverter full image
         uses: docker/build-push-action@v5
         with:
-          context: .
+          context: ./ctx             # ✅ 指定上下文目录
+          file: ./ctx/Dockerfile     # ✅ 指定 Dockerfile 路径
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
