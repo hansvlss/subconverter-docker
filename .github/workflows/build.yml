@@ -7,11 +7,6 @@ on:
         description: "subconverter release tag (e.g. v0.9.0)"
         required: false
         default: "v0.9.0"
-      push_latest:
-        description: "Also push :latest tag?"
-        type: boolean
-        required: false
-        default: true
   push:
     branches: [ main, master ]
 
@@ -102,19 +97,38 @@ jobs:
           ENTRYPOINT ["/entrypoint.sh"]
           DOCKER
 
-      - name: Prepare vendor
+      - name: Prepare vendor (with fallback mirrors)
         shell: bash
         run: |
           set -eux
           cd ctx
           mkdir -p vendor
+
           VER="${SC_VER:-v0.9.0}"
           N="${VER#v}"; VER="v${N}"
-          for ARCH in linux64 linuxarm64; do
-            URL="https://github.com/tindy2013/subconverter/releases/download/${VER}/subconverter_${ARCH}.tar.gz"
-            curl -fsSL --retry 5 -o vendor/subconverter_${ARCH}.tar.gz "$URL"
-            file vendor/subconverter_${ARCH}.tar.gz || true
-          done
+
+          download() {
+            local ARCH="$1"
+            local FILE="vendor/subconverter_${ARCH}.tar.gz"
+            for BASE in \
+              "https://github.com/tindy2013/subconverter/releases/download/${VER}" \
+              "https://download.fastgit.org/tindy2013/subconverter/releases/download/${VER}" \
+              "https://cdn.jsdelivr.net/gh/tindy2013/subconverter@${VER}" \
+              "https://ghproxy.net/https://github.com/tindy2013/subconverter/releases/download/${VER}" \
+            ; do
+              URL="${BASE}/subconverter_${ARCH}.tar.gz"
+              echo ">>> trying ${URL}"
+              if curl -fL --retry 5 -o "$FILE" "$URL"; then
+                echo "✅ downloaded $FILE"
+                return 0
+              fi
+            done
+            echo "❌ failed to download subconverter_${ARCH}" >&2
+            return 22
+          }
+
+          download linux64
+          download linuxarm64
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -137,9 +151,6 @@ jobs:
           VER="${SC_VER#v}"
           echo "ver=${VER}" >> "$GITHUB_OUTPUT"
           TAGS="${IMAGE_NAME}:${VER}-fix"
-          if [ "${{ inputs.push_latest || 'true' }}" = "true" ]; then
-            TAGS="${TAGS},${IMAGE_NAME}:latest"
-          fi
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
 
       - name: Build & Push
