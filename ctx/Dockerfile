@@ -22,7 +22,7 @@ RUN set -eux; \
     chmod -R 755 ${SC_HOME}
 
 # 复制启动脚本
-COPY ctx/entrypoint.sh /entrypoint.sh
+COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 # 暴露端口
