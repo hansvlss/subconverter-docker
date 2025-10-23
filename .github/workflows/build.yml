@@ -116,23 +116,76 @@ jobs:
           set -euxo pipefail
           cd ctx
           mkdir -p vendor
-          SC_VER="${SC_VER:-v0.9.0}"
-          BASE1="https://github.com/tindy2013/subconverter/releases/download/${SC_VER}"
-          BASE2="https://download.fastgit.org/tindy2013/subconverter/releases/download/${SC_VER}"
-          BASE3="https://downloads.sourceforge.net/project/subconverter/${SC_VER}"
+
+          # 版本号规范化：无论你填 0.9.0 或 v0.9.0，最终都用 v0.9.0
+          IN_VER="${SC_VER:-v0.9.0}"
+          N="${IN_VER#v}"; SCV="v${N}"
+          echo ">>> SC_VER input=${IN_VER}, normalized=${SCV}"
+
+          # 可能存在的文件名：tar.gz 或 zip（不同版本发布包不一致）
+          names_for_arch() {
+            case "$1" in
+              linux64)     echo "subconverter_linux64.tar.gz subconverter_linux64.zip" ;;
+              linuxarm64)  echo "subconverter_linuxarm64.tar.gz subconverter_linuxarm64.zip" ;;
+              *)           echo "unknown-arch"; return 1 ;;
+            esac
+          }
+
+          # 多个上游源，按顺序尝试
+          make_urls() {
+            local ver="$1" name="$2"
+            cat <<EOF
+https://github.com/tindy2013/subconverter/releases/download/${ver}/${name}
+https://download.fastgit.org/tindy2013/subconverter/releases/download/${ver}/${name}
+https://downloads.sourceforge.net/project/subconverter/${ver}/${name}
+https://cdn.jsdelivr.net/gh/tindy2013/subconverter@${ver}/${name}
+EOF
+          }
+
+          # 统一的 curl 选项
+          CURL_OPTS=( -fsSL --retry 5 --retry-all-errors --connect-timeout 10 --max-time 120 )
 
           for ARCH in linux64 linuxarm64; do
-            OUT=""
-            for NAME in "subconverter_${ARCH}.tar.gz" "subconverter_${ARCH}.zip"; do
-              for BASE in "$BASE1" "$BASE2" "$BASE3"; do
-                URL="${BASE}/${NAME}"
+            echo "=== downloading for ARCH=${ARCH}"
+            OUT_FINAL=""
+            for NAME in $(names_for_arch "${ARCH}"); do
+              for URL in $(make_urls "${SCV}" "${NAME}"); do
+                TMP="vendor/.part_${ARCH}"
                 echo ">>> try: ${URL}"
-                if curl -fsSL --retry 5 -o "vendor/${NAME}" "${URL}"; then
-                  OUT="vendor/${NAME}"
-                  break 2
+                # 先探测头，便于定位 404/403
+                (curl -I "${URL}" || true) | sed 's/^/HEAD: /' || true
+                if curl "${CURL_OPTS[@]}" -o "${TMP}" "${URL}"; then
+                  # 验证文件类型
+                  FT=$(file -b --mime-type "${TMP}" || true)
+                  echo ">>> got mime: ${FT}"
+                  case "${FT}" in
+                    application/gzip|application/x-gzip|application/zip)
+                      # 取扩展名
+                      case "${NAME}" in
+                        *.tar.gz) EXT=".tar.gz" ;;
+                        *.zip)    EXT=".zip" ;;
+                        *) EXT="" ;;
+                      esac
+                      OUT_FINAL="vendor/subconverter_${ARCH}${EXT}"
+                      mv -f "${TMP}" "${OUT_FINAL}"
+                      echo ">>> saved: ${OUT_FINAL}"
+                      file "${OUT_FINAL}" || true
+                      break 2
+                      ;;
+                    *)
+                      echo "!!! unexpected file type: ${FT}"
+                      head -c 200 "${TMP}" || true
+                      rm -f "${TMP}"
+                      ;;
+                  esac
                 fi
               done
             done
+            if [ -z "${OUT_FINAL}" ]; then
+              echo "!!! all download candidates failed for ${ARCH}"
+              exit 10
+            fi
+          done
             if [ -z "$OUT" ]; then
               echo "!!! all download candidates failed for ${ARCH}"
               exit 10
