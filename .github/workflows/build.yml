@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       sc_ver:
-        description: "subconverter release tag (e.g. v0.9.0)"
+        description: "subconverter release tag (e.g. v0.9.0 or 0.9.0)"
         required: false
         default: "v0.9.0"
       push_latest:
@@ -32,13 +32,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare build context (generate Dockerfile & files)
+      - name: Prepare build context (Dockerfile & files)
         shell: bash
         run: |
           set -euxo pipefail
           mkdir -p ctx/vendor ctx/rootfs/etc/subconverter
 
-          # --------- entrypoint ----------
+          # entrypoint
           cat > ctx/entrypoint.sh <<'SH'
           #!/usr/bin/env sh
           set -eu
@@ -55,21 +55,21 @@ jobs:
           SH
           chmod +x ctx/entrypoint.sh
 
-          # --------- default config (可选) ----------
+          # default config (optional)
           cat > ctx/rootfs/etc/subconverter/pref.ini <<'INI'
           [common]
           api_access = true
           port = 25500
           INI
 
-          # --------- .dockerignore ----------
+          # .dockerignore
           cat > ctx/.dockerignore <<'IGNORE'
           .git
           .github
           **/.DS_Store
           IGNORE
 
-          # --------- Dockerfile ----------
+          # Dockerfile
           cat > ctx/Dockerfile <<'DOCKER'
           FROM alpine:3.20
           ARG TARGETARCH
@@ -78,9 +78,7 @@ jobs:
               apk add --no-cache ca-certificates tzdata bash unzip curl libstdc++; \
               adduser -D -h /home/app app; \
               mkdir -p ${SC_HOME}
-          # 复制 vendor 包（由 workflow 准备）
           COPY vendor/ /tmp/vendor/
-          # 解包（支持 .tar.gz 与 .zip）
           RUN set -eux; \
               case "${TARGETARCH}" in \
                 amd64)  ARCH=linux64 ;; \
@@ -96,7 +94,6 @@ jobs:
                 *.tar.gz) tar -xzf "$PKG" -C  "${SC_HOME}" ;; \
                 *) echo "Unknown package type: $PKG"; exit 3 ;; \
               esac; \
-              # 某些发行包会多一层目录，扁平化
               if [ -d "${SC_HOME}/subconverter" ]; then \
                 mv "${SC_HOME}/subconverter/"* "${SC_HOME}/" && rmdir "${SC_HOME}/subconverter"; \
               fi; \
@@ -117,21 +114,21 @@ jobs:
           cd ctx
           mkdir -p vendor
 
-          # 版本号规范化：无论你填 0.9.0 或 v0.9.0，最终都用 v0.9.0
+          # 版本规范化：支持 0.9.0 或 v0.9.0
           IN_VER="${SC_VER:-v0.9.0}"
           N="${IN_VER#v}"; SCV="v${N}"
           echo ">>> SC_VER input=${IN_VER}, normalized=${SCV}"
 
-          # 可能存在的文件名：tar.gz 或 zip（不同版本发布包不一致）
+          # 发布包可能是 .tar.gz 或 .zip
           names_for_arch() {
             case "$1" in
               linux64)     echo "subconverter_linux64.tar.gz subconverter_linux64.zip" ;;
               linuxarm64)  echo "subconverter_linuxarm64.tar.gz subconverter_linuxarm64.zip" ;;
-              *)           echo "unknown-arch"; return 1 ;;
+              *)           return 1 ;;
             esac
           }
 
-          # 多个上游源，按顺序尝试
+          # 多源
           make_urls() {
             local ver="$1" name="$2"
             cat <<EOF
@@ -142,7 +139,6 @@ https://cdn.jsdelivr.net/gh/tindy2013/subconverter@${ver}/${name}
 EOF
           }
 
-          # 统一的 curl 选项
           CURL_OPTS=( -fsSL --retry 5 --retry-all-errors --connect-timeout 10 --max-time 120 )
 
           for ARCH in linux64 linuxarm64; do
@@ -152,15 +148,12 @@ EOF
               for URL in $(make_urls "${SCV}" "${NAME}"); do
                 TMP="vendor/.part_${ARCH}"
                 echo ">>> try: ${URL}"
-                # 先探测头，便于定位 404/403
                 (curl -I "${URL}" || true) | sed 's/^/HEAD: /' || true
                 if curl "${CURL_OPTS[@]}" -o "${TMP}" "${URL}"; then
-                  # 验证文件类型
                   FT=$(file -b --mime-type "${TMP}" || true)
                   echo ">>> got mime: ${FT}"
                   case "${FT}" in
                     application/gzip|application/x-gzip|application/zip)
-                      # 取扩展名
                       case "${NAME}" in
                         *.tar.gz) EXT=".tar.gz" ;;
                         *.zip)    EXT=".zip" ;;
@@ -186,20 +179,6 @@ EOF
               exit 10
             fi
           done
-            if [ -z "$OUT" ]; then
-              echo "!!! all download candidates failed for ${ARCH}"
-              exit 10
-            fi
-            case "$OUT" in
-              *.tar.gz) EXT=".tar.gz" ;;
-              *.zip)    EXT=".zip" ;;
-              *) echo "!!! unknown extension for $OUT"; file "$OUT" || true; exit 11 ;;
-            esac
-            TARGET="vendor/subconverter_${ARCH}${EXT}"
-            if [ "$OUT" != "$TARGET" ]; then mv "$OUT" "$TARGET"; fi
-            echo ">>> saved: $TARGET"
-            file "$TARGET" || true
-          done
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -222,10 +201,11 @@ EOF
           VER="${SC_VER#v}"
           echo "ver=${VER}" >> "$GITHUB_OUTPUT"
           TAGS="${IMAGE_NAME}:${VER}"
-          if [ "${{ inputs.push_latest || 'true' }}" = "true" ]; then
+          if [ "${{ inputs.push_latest || true }}" = "true" ]; then
             TAGS="${TAGS},${IMAGE_NAME}:latest"
           fi
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+          echo ">>> will push tags: ${TAGS}"
 
       - name: Build & Push (multi-arch)
         uses: docker/build-push-action@v6
@@ -235,8 +215,6 @@ EOF
           platforms: ${{ env.PLATFORMS }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
-          build-args: |
-            SC_VER=${{ env.SC_VER }}
 
       - name: Upload debug artifacts on failure
         if: failure()
