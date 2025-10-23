@@ -4,9 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       sc_ver:
-        description: "subconverter release tag (e.g. v0.9.0)"
+        description: "subconverter release tag (e.g. v0.9.0 or 0.8.1)"
         required: false
         default: "v0.9.0"
+      push_latest:
+        description: "Also push :latest tag?"
+        type: boolean
+        required: false
+        default: true
   push:
     branches: [ main, master ]
 
@@ -16,8 +21,6 @@ permissions:
 
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/subconverter
-  SC_VER: ${{ inputs.sc_ver || 'v0.9.0' }}
-  PLATFORMS: linux/amd64,linux/arm64
 
 jobs:
   docker:
@@ -30,7 +33,7 @@ jobs:
       - name: Prepare build context
         shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
           mkdir -p ctx/vendor ctx/rootfs/etc/subconverter
 
           cat > ctx/entrypoint.sh <<'SH'
@@ -39,13 +42,7 @@ jobs:
           : "${SC_PORT:=25500}"
           : "${SC_ADDR:=0.0.0.0}"
           : "${SC_ARGS:=}"
-          BIN="/opt/subconverter/subconverter"
-          if [ ! -x "$BIN" ]; then
-            echo "subconverter binary not found or not executable" >&2
-            ls -al /opt/subconverter || true
-            chmod +x "$BIN" 2>/dev/null || true
-          fi
-          exec "$BIN" -localaddr "${SC_ADDR}:${SC_PORT}" $SC_ARGS
+          exec /opt/subconverter/subconverter -localaddr "${SC_ADDR}:${SC_PORT}" ${SC_ARGS}
           SH
           chmod +x ctx/entrypoint.sh
 
@@ -55,18 +52,12 @@ jobs:
           port = 25500
           INI
 
-          cat > ctx/.dockerignore <<'IGNORE'
-          .git
-          .github
-          **/.DS_Store
-          IGNORE
-
           cat > ctx/Dockerfile <<'DOCKER'
           FROM alpine:3.20
           ARG TARGETARCH
           ARG SC_HOME=/opt/subconverter
           RUN set -eux; \
-              apk add --no-cache ca-certificates tzdata bash curl libstdc++; \
+              apk add --no-cache ca-certificates tzdata bash unzip curl libstdc++; \
               adduser -D -h /home/app app; \
               mkdir -p ${SC_HOME}
           COPY vendor/ /tmp/vendor/
@@ -76,11 +67,18 @@ jobs:
                 arm64)  ARCH=linuxarm64 ;; \
                 *) echo "Unsupported TARGETARCH: ${TARGETARCH}"; exit 1 ;; \
               esac; \
-              PKG="/tmp/vendor/subconverter_${ARCH}"; \
-              [ -f "$PKG" ] || (echo "vendor package missing"; ls -al /tmp/vendor; exit 2); \
-              echo ">>> installing binary $PKG"; \
-              mv "$PKG" "${SC_HOME}/subconverter"; \
-              chmod +x "${SC_HOME}/subconverter"; \
+              PKG=$(find /tmp/vendor -type f -name "subconverter_${ARCH}*" | head -n 1 || true); \
+              [ -n "$PKG" ] || (echo "no vendor package found"; ls -al /tmp/vendor; exit 2); \
+              echo ">>> installing from: $PKG"; \
+              case "$PKG" in \
+                *.zip) unzip -q "$PKG" -d "${SC_HOME}" ;; \
+                *.tar.gz) tar -xzf "$PKG" -C "${SC_HOME}" ;; \
+                *) mv "$PKG" "${SC_HOME}/subconverter"; chmod +x "${SC_HOME}/subconverter" ;; \
+              esac; \
+              if [ -d "${SC_HOME}/subconverter" ]; then \
+                mv "${SC_HOME}/subconverter/"* "${SC_HOME}/" && rmdir "${SC_HOME}/subconverter"; \
+              fi; \
+              chmod +x "${SC_HOME}/subconverter" || true; \
               chown -R app:app "${SC_HOME}"
           COPY entrypoint.sh /entrypoint.sh
           COPY rootfs/ /
@@ -90,43 +88,35 @@ jobs:
           ENTRYPOINT ["/entrypoint.sh"]
           DOCKER
 
-      - name: Prepare vendor (auto-detect file format)
+      - name: Fetch release assets dynamically
+        id: assets
         shell: bash
         run: |
-          set -eux
-          cd ctx
-          mkdir -p vendor
+          set -euxo pipefail
+          cd ctx/vendor
+          VER="${{ inputs.sc_ver || 'v0.9.0' }}"
+          TAG="v${VER#v}"
+          echo ">>> fetching GitHub release asset list for ${TAG}"
 
-          VER="${SC_VER:-v0.9.0}"
-          N="${VER#v}"; VER="v${N}"
+          # 调用 GitHub API 获取 release 信息
+          curl -sSf "https://api.github.com/repos/tindy2013/subconverter/releases/tags/${TAG}" \
+            -H "Accept: application/vnd.github+json" > release.json
+
+          echo ">>> assets found:"
+          jq -r '.assets[].name' release.json || true
 
           for ARCH in linux64 linuxarm64; do
-            FILE="vendor/subconverter_${ARCH}"
-            FOUND=0
-            for NAME in \
-              "subconverter_${ARCH}" \
-              "subconverter_${ARCH}.tar.gz" \
-              "subconverter_${ARCH}.zip"
-            do
-              for BASE in \
-                "https://github.com/tindy2013/subconverter/releases/download/${VER}" \
-                "https://download.fastgit.org/tindy2013/subconverter/releases/download/${VER}" \
-                "https://ghproxy.net/https://github.com/tindy2013/subconverter/releases/download/${VER}"
-              do
-                URL="${BASE}/${NAME}"
-                echo ">>> trying ${URL}"
-                if curl -fL --retry 5 -o "$FILE" "$URL"; then
-                  echo "✅ downloaded $NAME"
-                  FOUND=1
-                  break 2
-                fi
-              done
-            done
-            if [ $FOUND -eq 0 ]; then
-              echo "❌ failed to download subconverter_${ARCH}"
-              exit 22
+            FILE=$(jq -r --arg a "$ARCH" '.assets[].name | select(test($a))' release.json | head -n1 || true)
+            if [ -z "$FILE" ]; then
+              echo "❌ No asset found for $ARCH"
+              continue
             fi
+            URL=$(jq -r --arg f "$FILE" '.assets[] | select(.name==$f) | .browser_download_url' release.json)
+            echo ">>> downloading $URL → subconverter_${ARCH}"
+            curl -fL --retry 5 -o "subconverter_${ARCH}${FILE##*.zip}" "$URL" || true
           done
+
+          ls -lh
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -146,9 +136,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          VER="${SC_VER#v}"
-          echo "ver=${VER}" >> "$GITHUB_OUTPUT"
-          TAGS="${IMAGE_NAME}:${VER}-auto"
+          IN_VER="${{ inputs.sc_ver || 'v0.9.0' }}"
+          VER="${IN_VER#v}"
+          TAGS="${{ env.IMAGE_NAME }}:${VER}"
+          if [ "${{ inputs.push_latest || true }}" = "true" ]; then
+            TAGS="${TAGS},${{ env.IMAGE_NAME }}:latest"
+          fi
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
 
       - name: Build & Push
@@ -156,6 +149,13 @@ jobs:
         with:
           context: ctx
           file: ctx/Dockerfile
-          platforms: ${{ env.PLATFORMS }}
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
+
+      - name: Upload debug artifacts (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-artifacts
+          path: ctx/vendor/**
