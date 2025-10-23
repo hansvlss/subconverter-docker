@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       sc_ver:
-        description: "subconverter release tag (e.g. v0.9.0 or 0.8.1)"
+        description: "subconverter release tag (e.g. v0.9.0)"
         required: false
         default: "v0.9.0"
       push_latest:
@@ -93,12 +93,11 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          cd ctx/vendor
+          mkdir -p ctx/vendor
           VER="${{ inputs.sc_ver || 'v0.9.0' }}"
           TAG="v${VER#v}"
           echo ">>> fetching GitHub release asset list for ${TAG}"
 
-          # 获取 Release 信息
           curl -sSf "https://api.github.com/repos/tindy2013/subconverter/releases/tags/${TAG}" \
             -H "Accept: application/vnd.github+json" > release.json
 
@@ -114,13 +113,13 @@ jobs:
             URL=$(jq -r --arg f "$FILE" '.assets[] | select(.name==$f) | .browser_download_url' release.json)
             EXT="${FILE##*.}"
             [ "$EXT" = "$FILE" ] && EXT=""
-            OUT="subconverter_${ARCH}.${EXT}"
+            OUT="ctx/vendor/subconverter_${ARCH}.${EXT}"
             echo ">>> downloading $URL → $OUT"
             curl -fL --retry 5 -o "$OUT" "$URL"
           done
 
-          echo ">>> vendor directory after download:"
-          ls -lh .
+          echo ">>> Final vendor directory content:"
+          ls -lh ctx/vendor
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
