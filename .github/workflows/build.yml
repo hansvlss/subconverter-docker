@@ -21,12 +21,6 @@ permissions:
 
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/subconverter
-  # 这里只做占位，真正的版本在步骤中再次规范化
-  SC_VER: ${{ github.event.inputs.sc_ver }}
-
-defaults:
-  run:
-    shell: bash
 
 jobs:
   docker:
@@ -36,43 +30,35 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare build context (Dockerfile & files)
+      # 生成构建上下文（包含 Dockerfile / 入口脚本 / 默认配置）
+      - name: Prepare build context
+        shell: bash
         run: |
           set -euxo pipefail
           mkdir -p ctx/vendor ctx/rootfs/etc/subconverter
 
-          # entrypoint
           cat > ctx/entrypoint.sh <<'SH'
           #!/usr/bin/env sh
           set -eu
           : "${SC_PORT:=25500}"
           : "${SC_ADDR:=0.0.0.0}"
           : "${SC_ARGS:=}"
-          BIN="/opt/subconverter/subconverter"
-          if [ ! -x "$BIN" ]; then
-            echo "subconverter binary not found at $BIN" >&2
-            ls -al /opt/subconverter || true
-            exit 1
-          fi
-          exec "$BIN" -localaddr "${SC_ADDR}:${SC_PORT}" $SC_ARGS
+          exec /opt/subconverter/subconverter -localaddr "${SC_ADDR}:${SC_PORT}" ${SC_ARGS}
           SH
           chmod +x ctx/entrypoint.sh
 
-          # default config (optional)
           cat > ctx/rootfs/etc/subconverter/pref.ini <<'INI'
           [common]
           api_access = true
           port = 25500
           INI
 
-          # .dockerignore
           cat > ctx/.dockerignore <<'IGNORE'
           .git
           .github
           **/.DS_Store
           IGNORE
 
-          # Dockerfile
           cat > ctx/Dockerfile <<'DOCKER'
           FROM alpine:3.20
           ARG TARGETARCH
@@ -90,7 +76,7 @@ jobs:
               esac; \
               PKG="/tmp/vendor/subconverter_${ARCH}.tar.gz"; \
               [ -f "$PKG" ] || PKG="/tmp/vendor/subconverter_${ARCH}.zip"; \
-              [ -f "$PKG" ] || (echo "vendor package missing"; ls -al /tmp/vendor; exit 2); \
+              [ -f "$PKG" ] || (echo "vendor package missing for ${ARCH}"; ls -al /tmp/vendor || true; exit 2); \
               echo ">>> using package: $PKG"; file "$PKG" || true; \
               case "$PKG" in \
                 *.zip)    unzip -q "$PKG" -d "${SC_HOME}" ;; \
@@ -110,29 +96,37 @@ jobs:
           ENTRYPOINT ["/entrypoint.sh"]
           DOCKER
 
+      # 智能下载发布资产：存在就用，不存在就跳过
       - name: Prepare vendor (download release assets)
+        id: vendor
+        shell: bash
         run: |
           set -euxo pipefail
           cd ctx
           mkdir -p vendor
 
-          # 版本规范化：支持 0.9.0 或 v0.9.0
-          IN_VER="${SC_VER:-}"
-          if [ -z "$IN_VER" ]; then IN_VER="v0.9.0"; fi
-          N="${IN_VER#v}"
-          SCV="v${N}"
-          echo ">>> SC_VER input=${IN_VER}, normalized=${SCV}"
+          IN_VER="${{ inputs.sc_ver || 'v0.9.0' }}"
+          SCV="v${IN_VER#v}"
+          echo ">>> target release = ${SCV}"
 
-          # 可能是 .tar.gz 或 .zip
-          names_for_arch() {
+          # (仓库中的历史版本命名不一致) —— 针对每个架构列出候选文件名（按优先级依次尝试）
+          candidates_names() {
             case "$1" in
-              linux64)     echo "subconverter_linux64.tar.gz subconverter_linux64.zip" ;;
-              linuxarm64)  echo "subconverter_linuxarm64.tar.gz subconverter_linuxarm64.zip" ;;
-              *)           return 1 ;;
+              linux64)
+                echo "subconverter_linux64.tar.gz subconverter_linux64.zip"
+                ;;
+              linuxarm64)
+                # 历史上可能出现的各种写法
+                echo "subconverter_linuxarm64.tar.gz subconverter_linuxarm64.zip \
+                      subconverter_linux_aarch64.tar.gz subconverter_linux_aarch64.zip \
+                      subconverter_aarch64.tar.gz subconverter_aarch64.zip"
+                ;;
+              *)
+                return 1
             esac
           }
 
-          # 多源
+          # 多源镜像
           make_urls() {
             local ver="$1" name="$2"
             cat <<EOF
@@ -145,44 +139,49 @@ jobs:
 
           CURL_OPTS=( -fsSL --retry 5 --retry-all-errors --connect-timeout 10 --max-time 120 )
 
-          for ARCH in linux64 linuxarm64; do
-            echo "=== downloading for ARCH=${ARCH}"
-            OUT_FINAL=""
-            for NAME in $(names_for_arch "${ARCH}"); do
-              while read -r URL; do
-                TMP="vendor/.part_${ARCH}"
+          OK_PLATFORMS=()
+
+          # 架构 => 平台 映射
+          try_arch() {
+            local ARCH="$1" PLATFORM="$2"
+            local OUT_FINAL=""
+            for NAME in $(candidates_names "${ARCH}"); do
+              for URL in $(make_urls "${SCV}" "${NAME}"); do
                 echo ">>> try: ${URL}"
                 (curl -I "${URL}" || true) | sed 's/^/HEAD: /' || true
-                if curl "${CURL_OPTS[@]}" -o "${TMP}" "${URL}"; then
-                  FT=$(file -b --mime-type "${TMP}" || true)
-                  echo ">>> got mime: ${FT}"
+                if curl "${CURL_OPTS[@]}" -o "vendor/.part_${ARCH}" "${URL}"; then
+                  FT=$(file -b --mime-type "vendor/.part_${ARCH}" || true)
                   case "${FT}" in
-                    application/gzip|application/x-gzip|application/zip)
-                      case "${NAME}" in
-                        *.tar.gz) EXT=".tar.gz" ;;
-                        *.zip)    EXT=".zip" ;;
-                        *) EXT="" ;;
-                      esac
-                      OUT_FINAL="vendor/subconverter_${ARCH}${EXT}"
-                      mv -f "${TMP}" "${OUT_FINAL}"
-                      echo ">>> saved: ${OUT_FINAL}"
-                      file "${OUT_FINAL}" || true
-                      break 2
-                      ;;
-                    *)
-                      echo "!!! unexpected file type: ${FT}"
-                      head -c 200 "${TMP}" || true
-                      rm -f "${TMP}"
-                      ;;
+                    application/gzip|application/x-gzip)  EXT=".tar.gz" ;;
+                    application/zip)                       EXT=".zip" ;;
+                    *) echo "!!! unexpected file type: ${FT}"; head -c 200 "vendor/.part_${ARCH}" || true; rm -f "vendor/.part_${ARCH}"; continue ;;
                   esac
+                  OUT_FINAL="vendor/subconverter_${ARCH}${EXT}"
+                  mv -f "vendor/.part_${ARCH}" "${OUT_FINAL}"
+                  echo ">>> saved: ${OUT_FINAL}"
+                  file "${OUT_FINAL}" || true
+                  OK_PLATFORMS+=("${PLATFORM}")
+                  return 0
                 fi
-              done < <(make_urls "${SCV}" "${NAME}")
+              done
             done
-            if [ -z "${OUT_FINAL}" ]; then
-              echo "!!! all download candidates failed for ${ARCH}"
-              exit 10
-            fi
-          done
+            echo ">>> ${ARCH} not found in ${SCV}, skip this arch."
+            return 1
+          }
+
+          # 尝试 amd64 / arm64
+          try_arch linux64   linux/amd64 || true
+          try_arch linuxarm64 linux/arm64 || true
+
+          if [ "${#OK_PLATFORMS[@]}" -eq 0 ]; then
+            echo "!!! no downloadable assets for ${SCV} (both amd64/arm64 missing)."
+            exit 10
+          fi
+
+          # 输出最终平台列表（逗号分隔，无空格）
+          PLAT=$(IFS=, ; echo "${OK_PLATFORMS[*]}")
+          echo "platforms=${PLAT}" >> "$GITHUB_OUTPUT"
+          echo ">>> will build for platforms: ${PLAT}"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -199,31 +198,23 @@ jobs:
 
       - name: Compute tags
         id: meta
+        shell: bash
         run: |
           set -euo pipefail
-          # 版本号（去掉 v 用于 tag）
-          RAW="${SC_VER:-}"
-          if [ -z "$RAW" ]; then RAW="v0.9.0"; fi
-          VER="${RAW#v}"
-          echo "ver=${VER}" >> "$GITHUB_OUTPUT"
-
-          # 是否推 :latest（workflow_dispatch 才会有该输入；push 触发时为空，默认 true）
-          PL="${{ github.event.inputs.push_latest }}"
-          if [ -z "${PL}" ]; then PL="true"; fi
-
-          TAGS="${IMAGE_NAME}:${VER}"
-          if [ "${PL}" = "true" ]; then
-            TAGS="${TAGS},${IMAGE_NAME}:latest"
+          IN_VER="${{ inputs.sc_ver || 'v0.9.0' }}"
+          VER="${IN_VER#v}"
+          TAGS="${{ env.IMAGE_NAME }}:${VER}"
+          if [ "${{ inputs.push_latest || true }}" = "true" ]; then
+            TAGS="${TAGS},${{ env.IMAGE_NAME }}:latest"
           fi
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
-          echo ">>> will push tags: ${TAGS}"
 
-      - name: Build & Push (multi-arch)
+      - name: Build & Push
         uses: docker/build-push-action@v6
         with:
           context: ctx
           file: ctx/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ steps.vendor.outputs.platforms }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
 
